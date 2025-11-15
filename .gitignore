@@ -1,0 +1,41 @@
+# Environment and secrets
+.env
+*.env.local
+
+# Telethon session files
+.session/
+*.session
+*.session-journal
+
+# Data directories (large files, user-specific data)
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# OS
+Thumbs.db

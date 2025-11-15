@@ -1,0 +1,17 @@
+version: "3.8"
+services:
+  backfiller:
+    image: tg-backfiller
+    build: .
+    tty: true
+    stdin_open: true
+    volumes:
+      - ./data:/app/data
+      - ./.session:/app/.session
+    env_file:
+      - .env
+    entrypoint: ["/bin/bash"]
+    # Example interactive run:
+    # docker-compose run backfiller python backfill.py --channel "@channel" --from 2020-01-01 --to 2020-02-01
+    # Example pipeline run inside container:
+    # docker-compose run backfiller python run_channel_pipeline.py --channel "@channel" --from 2020-01-01 --to 2023-01-01 --no-media
