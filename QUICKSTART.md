@@ -100,3 +100,35 @@ docker run --rm -it \
 - Always use `--no-media` for testing to save disk space
 - Session file persists login - subsequent runs are headless
 - Scripts auto-resume from last processed message
+
+---
+
+## Simple (venv + pip) — Minimal workflow
+
+For a solo project where you want minimal tooling, use a standard Python virtual environment and `pip`.
+
+1. Create and activate a venv:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+2. Upgrade pip and install dependencies:
+```bash
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+3. Run scripts inside the venv:
+```bash
+python summarizer.py --channel <channel_id>
+# or
+python processor.py
+```
+
+4. Deactivate when done:
+```bash
+deactivate
+```
+
+This is the simplest workflow for development and local testing. If you later want reproducible lockfiles or nicer dependency UX, switch to Poetry.

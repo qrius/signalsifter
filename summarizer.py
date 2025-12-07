@@ -15,11 +15,17 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import openai
 import textwrap
+import requests
+import re
+from collections import Counter
 
 load_dotenv()
 DB_PATH = os.getenv("SQLITE_DB_PATH", "./data/backfill.sqlite")
 DEFAULT_CHUNK_DAYS = int(os.getenv("DEFAULT_CHUNK_DAYS", 7))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "hf")  # options: openai, hf, local
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+HF_MODEL = os.getenv("HF_MODEL", "gpt2")
 BOT_NAME = os.getenv("BOT_NAME", "SignalSifter")
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
@@ -54,12 +60,90 @@ def make_prompt(messages_chunk):
     user += "\nProduce:\n1) One-line summary (single sentence).\n2) Bulleted list (3-6) of key facts, each bullet short and include dates / contract addresses where available.\n"
     return system, user
 
+def _hf_call(prompt_text, model_name=HF_MODEL, max_tokens=500):
+    if not HF_API_TOKEN:
+        raise RuntimeError("No HF_API_TOKEN provided for Hugging Face inference.")
+    url = f"https://api-inference.huggingface.co/models/{model_name}"
+    headers = {"Authorization": f"Bearer {HF_API_TOKEN}", "Content-Type": "application/json"}
+    payload = {"inputs": prompt_text, "parameters": {"max_new_tokens": max_tokens, "return_full_text": False}}
+    r = requests.post(url, headers=headers, json=payload, timeout=30)
+    r.raise_for_status()
+    out = r.json()
+    # HF inference output shape varies by model; try to extract text
+    if isinstance(out, dict) and out.get("error"):
+        raise RuntimeError("HF inference error: " + out.get("error"))
+    if isinstance(out, list):
+        # typically [{'generated_text': '...'}]
+        first = out[0]
+        if isinstance(first, dict):
+            return first.get("generated_text") or first.get("text") or str(first)
+        return str(first)
+    return str(out)
+
+
+def _local_fallback(messages_chunk, max_bullets=5):
+    """Very small extractive fallback: pick messages that look most informative.
+    Heuristic: score by length + presence of hex-like tokens (contract addresses) + numbers/dates.
+    """
+    scores = []
+    for mid, usern, date, text in messages_chunk:
+        t = (text or "").strip()
+        score = len(t)
+        # reward hex-like tokens (0x...)
+        if re.search(r"0x[0-9a-fA-F]{6,}", t):
+            score += 200
+        # reward presence of dates/numbers
+        if re.search(r"\d{4}-\d{2}-\d{2}|\d{2}:\d{2}|\b\d{3,}\b", t):
+            score += 50
+        scores.append((score, mid, usern, date, t))
+    scores.sort(reverse=True, key=lambda x: x[0])
+    top = scores[:max_bullets]
+    bullets = []
+    for s, mid, usern, date, t in top:
+        snippet = t
+        if len(snippet) > 300:
+            snippet = snippet[:300] + "..."
+        bullets.append(f"- [{date}] @{usern or 'unknown'}: {snippet}")
+    one_line = (top[0][4][:200] + "...") if top else "No messages to summarize."
+    out = f"One-line summary: {one_line}\n\nBullets:\n" + "\n".join(bullets)
+    return out
+
+
 def call_llm(system, prompt_text, model="gpt-3.5-turbo", max_tokens=500):
-    if not OPENAI_API_KEY:
-        raise RuntimeError("No OPENAI_API_KEY provided. Set it in .env or implement another provider in this script.")
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_text}]
-    resp = openai.ChatCompletion.create(model=model, messages=messages, max_tokens=max_tokens, temperature=0.2)
-    return resp.choices[0].message.content.strip()
+    provider = (LLM_PROVIDER or "hf").lower()
+    if provider == "openai":
+        if not OPENAI_API_KEY:
+            raise RuntimeError("LLM_PROVIDER=openai but OPENAI_API_KEY missing")
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_text}]
+        resp = openai.ChatCompletion.create(model=model, messages=messages, max_tokens=max_tokens, temperature=0.2)
+        return resp.choices[0].message.content.strip()
+    elif provider == "hf":
+        # Hugging Face text-generation style call; combine system + user into single prompt
+        combined = system + "\n\n" + prompt_text
+        try:
+            return _hf_call(combined, model_name=HF_MODEL, max_tokens=max_tokens)
+        except Exception as e:
+            # fall back to local extractive summarizer
+            print("HF call failed, falling back to local summarizer:", e)
+            # Try to extract messages from prompt_text (the make_prompt format)
+            msgs = []
+            for line in prompt_text.splitlines():
+                m = re.match(r"- \[(.*?)\] @?(.*?): (.*)$", line)
+                if m:
+                    date, usern, text = m.groups()
+                    msgs.append((None, usern, date, text))
+            return _local_fallback(msgs)
+    elif provider == "local":
+        # Expect prompt_text in make_prompt format; parse messages and run fallback
+        msgs = []
+        for line in prompt_text.splitlines():
+            m = re.match(r"- \[(.*?)\] @?(.*?): (.*)$", line)
+            if m:
+                date, usern, text = m.groups()
+                msgs.append((None, usern, date, text))
+        return _local_fallback(msgs)
+    else:
+        raise RuntimeError(f"Unknown LLM_PROVIDER: {provider}")
 
 def generate_summary_md(channel_id, window_days=DEFAULT_CHUNK_DAYS, since=None, until=None):
     # If since/until provided, ignore window_days and summarize that range
