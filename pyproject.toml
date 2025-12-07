@@ -1,6 +1,0 @@
-"""
-Poetry configuration removed.
-
-This project uses a simple `venv` + `pip` workflow for development.
-If you need Poetry later, re-add a `pyproject.toml` and run `poetry init`.
-"""
