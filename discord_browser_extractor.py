@@ -56,8 +56,9 @@ class DiscordBrowserExtractor:
         self.config = config or {}
         self.setup_logging()
         
-        # Initialize database
-        self.db = DiscordDatabase()
+        # Initialize database - use shared database with Telegram data
+        db_path = os.path.join(os.path.dirname(__file__), 'data', 'backfill.sqlite')
+        self.db = DiscordDatabase(db_path)
         self.db.create_discord_tables()
         
         # Browser settings
@@ -147,23 +148,38 @@ class DiscordBrowserExtractor:
         
         self.logger.info("Browser setup completed")
     
-    async def login_to_discord(self) -> bool:
+    async def check_authentication(self, target_url: str) -> bool:
+        """Check if we can access the target Discord channel without login redirect"""
+        try:
+            self.logger.info("Checking Discord authentication...")
+            
+            # Try to navigate to the target channel URL directly
+            await self.page.goto(target_url, wait_until="load", timeout=15000)
+            await asyncio.sleep(3)
+            
+            current_url = self.page.url
+            
+            # If we're redirected to login, we need to authenticate
+            if "discord.com/login" in current_url:
+                self.logger.info("Not authenticated - redirected to login")
+                return False
+            elif "/channels/" in current_url:
+                self.logger.info("Successfully authenticated - on channel page")
+                return True
+            else:
+                self.logger.info(f"Unexpected URL after navigation: {current_url}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error checking authentication: {e}")
+            return False
+
+    async def login_to_discord(self, target_url: str) -> bool:
         """Login to Discord with manual assistance if needed"""
         try:
-            # Check if already logged in by looking for Discord app
-            self.logger.info("Checking if already logged in to Discord...")
-            
-            try:
-                await self.page.goto("https://discord.com/app", wait_until="load", timeout=15000)
-                # Wait a bit for the page to fully load
-                await asyncio.sleep(3)
-                
-                # If we're already in the app, we're logged in
-                if "/channels/" in self.page.url or "discord.com/app" in self.page.url:
-                    self.logger.info("Already logged in to Discord")
-                    return True
-            except Exception as e:
-                self.logger.info(f"Not logged in yet, proceeding with login: {e}")
+            # Check if already authenticated
+            if await self.check_authentication(target_url):
+                return True
             
             # Need to login - try automated login first
             self.logger.info("Attempting automated Discord login...")
@@ -293,8 +309,8 @@ class DiscordBrowserExtractor:
             
             message_id = message_id.replace('chat-messages-', '')
             
-            # Extract timestamp
-            timestamp_elem = message_element.locator('time')
+            # Extract timestamp - use first time element to avoid edited message conflicts
+            timestamp_elem = message_element.locator('time').first
             timestamp_str = await timestamp_elem.get_attribute('datetime') if await timestamp_elem.count() > 0 else None
             
             if not timestamp_str:
@@ -302,17 +318,119 @@ class DiscordBrowserExtractor:
             
             timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
             
-            # Extract user information
-            username_elem = message_element.locator('[data-testid="message-username"]')
-            username = await username_elem.inner_text() if await username_elem.count() > 0 else "Unknown"
+            # Extract user information with updated 2025 selectors
+            username = "Unknown"
+            username_selectors = [
+                '.username-h_Y3Us',  # Primary Discord 2025 selector
+                '.headerText-2z4IhQ .username-h_Y3Us',
+                'span[class*="username"]', 
+                '.author-1Ml4Lp .username-h_Y3Us',
+                'h3[class*="header"] .username-h_Y3Us',
+                '.messageHeader-1Nh1u7 .username-h_Y3Us',
+                'button[class*="username"]',
+                '.clickable-vvKY2q .username-h_Y3Us',
+                # Fallback selectors
+                '[data-testid="message-username"]',
+                '.username',
+                '[class*="username"]'
+            ]
             
-            # Extract user ID from click handler or avatar
-            user_id_elem = message_element.locator('[data-user-id]').first
-            user_id = await user_id_elem.get_attribute('data-user-id') if await user_id_elem.count() > 0 else username
+            for selector in username_selectors:
+                try:
+                    username_elem = message_element.locator(selector).first
+                    if await username_elem.count() > 0:
+                        username_text = await username_elem.inner_text()
+                        if username_text and username_text.strip() and username_text != "Unknown":
+                            username = username_text.strip()
+                            self.logger.debug(f"Found username '{username}' using: {selector}")
+                            break
+                except Exception:
+                    continue
             
-            # Extract message content
-            content_elem = message_element.locator('[data-testid="message-content"]')
-            content = await content_elem.inner_text() if await content_elem.count() > 0 else ""
+            # Extract user ID with multiple approaches
+            user_id = username  # fallback to username
+            user_id_selectors = [
+                '[data-user-id]',
+                '[data-author-id]', 
+                '.avatar img[src*="avatars"]',
+                '.avatar[style*="background-image"]',
+                '[class*="avatar"] img'
+            ]
+            
+            for selector in user_id_selectors:
+                try:
+                    user_elem = message_element.locator(selector).first
+                    if await user_elem.count() > 0:
+                        # Try data attributes first
+                        for attr in ['data-user-id', 'data-author-id']:
+                            attr_value = await user_elem.get_attribute(attr)
+                            if attr_value:
+                                user_id = attr_value
+                                break
+                        
+                        # Extract from avatar URL if needed
+                        if user_id == username:
+                            src = await user_elem.get_attribute('src')
+                            if src and 'avatars/' in src:
+                                # Extract user ID from avatar URL pattern
+                                import re
+                                match = re.search(r'avatars/(\d+)/', src)
+                                if match:
+                                    user_id = match.group(1)
+                                    break
+                        
+                        if user_id != username:
+                            break
+                except Exception:
+                    continue
+            
+            # Extract message content with updated 2025 selectors
+            content = ""
+            content_selectors = [
+                'div[id^="message-content-"]',  # Primary Discord 2025 selector
+                '.messageContent-2t3eCI',
+                '.markup-eYLPri',
+                'div[class*="messageContent"]',
+                'div[class*="markup"]',
+                '.contents-3ca1mk .markup-eYLPri',
+                'span[class*="markup"]',
+                '.content-1Lc7Cv',
+                # Fallback selectors
+                '[data-testid="message-content"]',
+                'div[class*="content"]:not([class*="avatar"])',
+                '.messageContent',
+                '[class*="messageContent"]'
+            ]
+            
+            for selector in content_selectors:
+                try:
+                    content_elem = message_element.locator(selector).first
+                    if await content_elem.count() > 0:
+                        content_text = await content_elem.inner_text()
+                        if content_text and content_text.strip():
+                            content = content_text.strip()
+                            self.logger.debug(f"Found content ({len(content)} chars) using: {selector}")
+                            break
+                except Exception:
+                    continue
+            
+            # If still no content, try getting all text and filtering
+            if not content:
+                try:
+                    all_text = await message_element.inner_text()
+                    # Remove username and timestamp from content
+                    lines = all_text.split('\n')
+                    filtered_lines = []
+                    for line in lines:
+                        line = line.strip()
+                        if line and line != username and not re.match(r'^(Today|Yesterday|\d+/\d+/\d+)', line):
+                            filtered_lines.append(line)
+                    
+                    if filtered_lines:
+                        content = '\n'.join(filtered_lines)
+                        self.logger.debug(f"Extracted content via text filtering: {len(content)} chars")
+                except:
+                    pass
             
             # Extract reactions
             reactions_data = []
@@ -389,42 +507,117 @@ class DiscordBrowserExtractor:
             
         except Exception as e:
             self.logger.error(f"Error extracting message data: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             return None
     
-    async def scroll_to_load_messages(self, target_count: int = None) -> int:
-        """Scroll up to load older messages"""
+    async def scroll_to_load_messages(self, target_count: int = None, months_back: int = None) -> int:
+        """Scroll up to load older messages with better persistence"""
         messages_loaded = 0
         consecutive_no_new_messages = 0
+        max_attempts = 20  # Much more persistent - 20 consecutive failures before giving up
         
-        while True:
+        # Calculate cutoff date if months_back is specified
+        cutoff_date = None
+        if months_back:
+            from datetime import timezone, timedelta
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=months_back * 30)
+            self.logger.info(f"Loading messages back to: {cutoff_date}")
+        
+        scroll_attempts = 0
+        while scroll_attempts < 50:  # Maximum scroll attempts to prevent infinite loops
             # Get current message count
-            current_messages = await self.page.locator('[id^="chat-messages-"]').count()
+            # Try multiple message selectors
+            message_selectors = [
+                '[id^="chat-messages-"]',
+                '[class*="message-"][id]',
+                '[data-list-item-id]',
+                'li[id][class*="messageListItem"]',
+                'div[id][class*="message"]'
+            ]
+            
+            current_messages = 0
+            for selector in message_selectors:
+                count = await self.page.locator(selector).count()
+                if count > current_messages:
+                    current_messages = count
+                    self.current_message_selector = selector  # Store the working selector
             
             if target_count and current_messages >= target_count:
+                self.logger.info(f"Reached target message count: {current_messages}")
                 break
             
-            # Scroll to top to load older messages
-            await self.page.keyboard.press('Home')
-            await self.human_delay(2, 4)
+            # Check if we've reached the date cutoff by examining the oldest visible message
+            if cutoff_date and current_messages > 10:  # Only check if we have some messages loaded
+                try:
+                    # Get the first (oldest) message timestamp
+                    # Use the working selector we found
+                    selector = getattr(self, 'current_message_selector', '[id^="chat-messages-"]')
+                    first_message = self.page.locator(selector).first
+                    timestamp_elem = first_message.locator('time').first
+                    if await timestamp_elem.count() > 0:
+                        timestamp_str = await timestamp_elem.get_attribute('datetime')
+                        if timestamp_str:
+                            message_date = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            if message_date < cutoff_date:
+                                self.logger.info(f"Reached date cutoff: {message_date} < {cutoff_date}")
+                                break
+                except Exception as e:
+                    self.logger.debug(f"Error checking date cutoff: {e}")
             
-            # Wait for potential new messages to load
-            await asyncio.sleep(2)
+            # Aggressive scrolling with multiple methods
+            scroll_method = scroll_attempts % 4
             
-            new_message_count = await self.page.locator('[id^="chat-messages-"]').count()
+            if scroll_method == 0:
+                # Method 1: Home key (most reliable)
+                await self.page.keyboard.press('Home')
+            elif scroll_method == 1:
+                # Method 2: Page Up multiple times
+                for _ in range(3):
+                    await self.page.keyboard.press('PageUp')
+                    await asyncio.sleep(0.5)
+            elif scroll_method == 2:
+                # Method 3: Mouse wheel scrolling
+                for _ in range(5):
+                    await self.page.mouse.wheel(0, -1000)
+                    await asyncio.sleep(0.3)
+            else:
+                # Method 4: Direct message container scrolling
+                try:
+                    message_container = self.page.locator('[data-list-id="chat-messages"], [class*="scroller"], [class*="content"]').first
+                    if await message_container.count() > 0:
+                        await message_container.evaluate('element => element.scrollTop = 0')
+                except Exception as e:
+                    self.logger.debug(f"Container scroll failed: {e}")
+                    await self.page.keyboard.press('Home')
+            
+            await self.human_delay(1, 2)
+            
+            # Wait for messages to load - longer wait on later attempts
+            wait_time = min(3 + (consecutive_no_new_messages * 0.5), 6)
+            await asyncio.sleep(wait_time)
+            
+            # Use the working selector we identified
+            selector = getattr(self, 'current_message_selector', '[id^="chat-messages-"]')
+            new_message_count = await self.page.locator(selector).count()
             
             if new_message_count == current_messages:
                 consecutive_no_new_messages += 1
-                if consecutive_no_new_messages >= 3:  # No new messages loaded after 3 tries
-                    self.logger.info("Reached the beginning of channel history")
+                self.logger.debug(f"No new messages loaded, attempt {consecutive_no_new_messages}/{max_attempts}")
+                if consecutive_no_new_messages >= max_attempts:
+                    self.logger.info("Reached the beginning of channel history or loading limit")
                     break
             else:
                 consecutive_no_new_messages = 0
                 messages_loaded = new_message_count
-                self.logger.info(f"Loaded {new_message_count} messages")
+                self.logger.info(f"Loaded {new_message_count} messages (+{new_message_count - current_messages})")
+            
+            scroll_attempts += 1
             
             # Apply rate limiting
             await self.rate_limit_delay()
         
+        self.logger.info(f"Final message count: {messages_loaded}")
         return messages_loaded
     
     async def extract_channel_messages(self, channel_url: str, limit: int = None, 
@@ -460,17 +653,41 @@ class DiscordBrowserExtractor:
                 target_messages = months_back * 1000  # Assume ~1000 messages per month
             
             # Load messages by scrolling
-            await self.scroll_to_load_messages(target_messages)
+            await self.scroll_to_load_messages(target_messages, months_back)
             
             # Extract all visible messages
             messages = []
-            message_elements = await self.page.locator('[id^="chat-messages-"]').all()
+            # Use the selector that worked during scrolling, or try multiple
+            message_elements = []
+            message_selectors = [
+                getattr(self, 'current_message_selector', '[id^="chat-messages-"]'),
+                '[id^="chat-messages-"]',
+                '[class*="message-"][id]', 
+                '[data-list-item-id]',
+                'li[id][class*="messageListItem"]',
+                'div[id][class*="message"]'
+            ]
+            
+            for selector in message_selectors:
+                try:
+                    elements = await self.page.locator(selector).all()
+                    if len(elements) > len(message_elements):
+                        message_elements = elements
+                        self.logger.info(f"Found {len(elements)} messages using selector: {selector}")
+                        break
+                except Exception as e:
+                    self.logger.debug(f"Selector {selector} failed: {e}")
+                    continue
             
             self.logger.info(f"Found {len(message_elements)} messages to process")
             
             for i, message_elem in enumerate(message_elements):
                 message_data = await self.extract_message_data(message_elem)
                 
+                if not message_data:
+                    self.logger.warning(f"Message {i+1} returned no data")
+                    continue
+                    
                 if message_data:
                     message_data['channel_id'] = channel_id
                     message_data['server_id'] = server_id
@@ -494,6 +711,10 @@ class DiscordBrowserExtractor:
                     messages.append(message_data)
                     
                     if not dry_run:
+                        # Add channel and server IDs to message data before saving
+                        message_data['channel_id'] = channel_id
+                        message_data['server_id'] = server_id
+                        
                         # Store in database
                         self.db.insert_message(message_data)
                         
@@ -563,10 +784,17 @@ class DiscordBrowserExtractor:
     
     async def cleanup(self):
         """Clean up browser resources"""
-        if self.page:
-            await self.page.close()
-        if self.browser:
-            await self.browser.close()
+        try:
+            if self.page:
+                await self.page.close()
+        except Exception as e:
+            self.logger.warning(f"Error closing page: {e}")
+        
+        try:
+            if self.browser:
+                await self.browser.close()
+        except Exception as e:
+            self.logger.warning(f"Error closing browser: {e}")
 
 async def main():
     """Main CLI interface"""
@@ -600,7 +828,7 @@ async def main():
         await extractor.setup_browser(headless=args.headless)
         
         # Login to Discord
-        if not await extractor.login_to_discord():
+        if not await extractor.login_to_discord(args.url):
             print("Failed to login to Discord. Please check your credentials.")
             return 1
         
