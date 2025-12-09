@@ -1,7 +1,28 @@
 #!/usr/bin/env python3
 """
 Discord Database Schema for SignalSifter
-Creates and manages Discord-specific database tables with proper relationships
+
+Comprehensive database schema management for Discord message extraction system.
+Creates and manages Discord-specific SQLite database tables with proper relationships,
+foreign keys, and indexing for optimal performance.
+
+Database Tables:
+- discord_servers: Server/guild information
+- discord_channels: Channel metadata and relationships
+- discord_messages: Message content, metadata, reactions
+- discord_extraction_log: Extraction process tracking and resume functionality
+- discord_status: System status and health monitoring
+
+Features:
+- Automatic table creation and schema management
+- Foreign key constraints for data integrity
+- Proper indexing for query performance
+- Extraction logging and progress tracking
+- Message insertion with duplicate handling
+- Status monitoring and health checks
+
+Author: SignalSifter Project
+Date: December 2025
 """
 
 import sqlite3

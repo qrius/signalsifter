@@ -1,7 +1,31 @@
 #!/usr/bin/env python3
 """
 Discord Browser Extractor for SignalSifter
-Playwright-based Discord message extraction with anti-detection and rate limiting
+
+A comprehensive Discord message extraction system using Playwright browser automation.
+Designed to extract historical messages from Discord channels with proper rate limiting,
+anti-detection measures, and database storage integration.
+
+Features:
+- Browser-based automation with anti-detection measures
+- Automatic login with fallback to manual authentication
+- Rate limiting and human-like delays
+- Comprehensive message data extraction (content, reactions, embeds, etc.)
+- SQLite database storage with proper relationships
+- Resume functionality for interrupted extractions
+- Configurable extraction timeframes (by months or message limits)
+- Headless and interactive modes
+
+Usage:
+    python discord_browser_extractor.py --url "DISCORD_CHANNEL_URL" --months 6 --verbose
+    
+Requirements:
+- Discord credentials in .env file (DISCORD_EMAIL, DISCORD_PASSWORD)
+- Playwright browsers installed
+- Python dependencies: playwright, fake-useragent, beautifulsoup4
+
+Author: SignalSifter Project
+Date: December 2025
 """
 
 import asyncio
@@ -124,55 +148,79 @@ class DiscordBrowserExtractor:
         self.logger.info("Browser setup completed")
     
     async def login_to_discord(self) -> bool:
-        """Login to Discord using credentials from environment"""
+        """Login to Discord with manual assistance if needed"""
         try:
             # Check if already logged in by looking for Discord app
-            await self.page.goto("https://discord.com/app", wait_until="networkidle")
+            self.logger.info("Checking if already logged in to Discord...")
             
-            # If we're already in the app, we're logged in
-            if "/channels/" in self.page.url or "discord.com/app" in self.page.url:
-                self.logger.info("Already logged in to Discord")
-                return True
-            
-            # Need to login
-            self.logger.info("Logging in to Discord")
-            await self.page.goto("https://discord.com/login", wait_until="networkidle")
-            
-            # Get credentials from environment
-            email = os.getenv('DISCORD_EMAIL')
-            password = os.getenv('DISCORD_PASSWORD')
-            
-            if not email or not password:
-                self.logger.error("Discord credentials not found in environment variables")
-                self.logger.error("Please set DISCORD_EMAIL and DISCORD_PASSWORD in your .env file")
-                return False
-            
-            # Fill login form
-            await self.page.fill('input[name="email"]', email)
-            await self.page.fill('input[name="password"]', password)
-            
-            # Add human-like delay
-            await self.human_delay(1, 3)
-            
-            # Click login button
-            await self.page.click('button[type="submit"]')
-            
-            # Wait for login to complete
             try:
-                await self.page.wait_for_url("**/channels/**", timeout=30000)
-                self.logger.info("Successfully logged in to Discord")
+                await self.page.goto("https://discord.com/app", wait_until="load", timeout=15000)
+                # Wait a bit for the page to fully load
+                await asyncio.sleep(3)
+                
+                # If we're already in the app, we're logged in
+                if "/channels/" in self.page.url or "discord.com/app" in self.page.url:
+                    self.logger.info("Already logged in to Discord")
+                    return True
+            except Exception as e:
+                self.logger.info(f"Not logged in yet, proceeding with login: {e}")
+            
+            # Need to login - try automated login first
+            self.logger.info("Attempting automated Discord login...")
+            
+            try:
+                await self.page.goto("https://discord.com/login", wait_until="load", timeout=15000)
+                await asyncio.sleep(2)
+                
+                # Get credentials from environment
+                email = os.getenv('DISCORD_EMAIL')
+                password = os.getenv('DISCORD_PASSWORD')
+                
+                if email and password:
+                    self.logger.info("Found credentials, attempting automated login...")
+                    
+                    # Fill login form
+                    await self.page.fill('input[name="email"]', email)
+                    await self.human_delay(0.5, 1)
+                    await self.page.fill('input[name="password"]', password)
+                    await self.human_delay(1, 2)
+                    
+                    # Click login button
+                    await self.page.click('button[type="submit"]')
+                    
+                    # Wait for login to complete or require manual intervention
+                    try:
+                        await self.page.wait_for_url("**/channels/**", timeout=15000)
+                        self.logger.info("Successfully logged in to Discord automatically")
+                        return True
+                    except:
+                        self.logger.info("Automated login requires manual intervention...")
+                
+            except Exception as e:
+                self.logger.info(f"Automated login failed, switching to manual mode: {e}")
+            
+            # Manual login mode
+            self.logger.info("=" * 60)
+            self.logger.info("MANUAL LOGIN REQUIRED")
+            self.logger.info("=" * 60)
+            self.logger.info("Please complete Discord login in the browser window:")
+            self.logger.info("1. Enter your email/password if not already filled")
+            self.logger.info("2. Complete any 2FA/captcha verification")
+            self.logger.info("3. Wait for Discord to fully load")
+            self.logger.info("4. Press Enter in this terminal when ready...")
+            self.logger.info("=" * 60)
+            
+            # Wait for user confirmation
+            input("\nPress Enter after you've logged in to Discord...")
+            
+            # Verify login was successful
+            current_url = self.page.url
+            if "/channels/" in current_url or "discord.com/app" in current_url:
+                self.logger.info("Manual login successful!")
                 return True
-            except:
-                # Check if we need 2FA or captcha
-                if await self.page.locator('input[placeholder*="6-digit"]').count() > 0:
-                    self.logger.error("2FA required - not currently supported in automation")
-                    return False
-                elif await self.page.locator('[data-testid="captcha"]').count() > 0:
-                    self.logger.error("CAPTCHA required - manual intervention needed")
-                    return False
-                else:
-                    self.logger.error("Login failed - check credentials")
-                    return False
+            else:
+                self.logger.error(f"Still not logged in. Current URL: {current_url}")
+                return False
                     
         except Exception as e:
             self.logger.error(f"Login error: {e}")
@@ -387,10 +435,6 @@ class DiscordBrowserExtractor:
             if not server_id or not channel_id:
                 raise ValueError("Invalid Discord channel URL")
             
-            # Start extraction logging
-            if not dry_run:
-                self.extraction_log_id = self.db.log_extraction_start(channel_id, "browser_extraction")
-            
             # Navigate to channel
             if not await self.navigate_to_channel(channel_url):
                 return []
@@ -400,9 +444,12 @@ class DiscordBrowserExtractor:
             server_name = await self.get_server_name()
             
             if not dry_run:
-                # Store server and channel info
+                # Store server and channel info first (required for foreign key)
                 self.db.insert_server(server_id, server_name or "Unknown Server")
                 self.db.insert_channel(channel_id, server_id, channel_name or "Unknown Channel")
+                
+                # Now start extraction logging (after channel exists in DB)
+                self.extraction_log_id = self.db.log_extraction_start(channel_id, "browser_extraction")
             
             self.logger.info(f"Extracting from #{channel_name} in {server_name}")
             
@@ -430,9 +477,19 @@ class DiscordBrowserExtractor:
                     
                     # Filter by date if months_back is specified
                     if months_back:
-                        cutoff_date = datetime.utcnow() - timedelta(days=months_back * 30)
-                        if message_data['timestamp'] < cutoff_date:
-                            continue
+                        from datetime import timezone
+                        cutoff_date = datetime.now(timezone.utc) - timedelta(days=months_back * 30)
+                        # Ensure both dates are comparable
+                        msg_timestamp = message_data['timestamp']
+                        if hasattr(msg_timestamp, 'tzinfo') and msg_timestamp.tzinfo is None:
+                            # If message timestamp is naive, assume UTC
+                            msg_timestamp = msg_timestamp.replace(tzinfo=timezone.utc)
+                        elif not hasattr(msg_timestamp, 'tzinfo'):
+                            # If it's not a datetime, skip date filtering
+                            pass
+                        else:
+                            if msg_timestamp < cutoff_date:
+                                continue
                     
                     messages.append(message_data)
                     
