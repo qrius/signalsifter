@@ -53,8 +53,12 @@ def main():
     to_arg = ["--to", args.to_date] if args.to_date else []
     no_media_flag = ["--no-media"] if args.no_media else []
 
-    # 1) Backfill
-    backfill_cmd = ["python", "backfill.py", "--channel", args.channel] + since_arg + to_arg + no_media_flag
+    # 1) Backfill (use virtual environment Python)
+    python_exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "bin", "python")
+    if not os.path.exists(python_exe):
+        python_exe = "python"  # Fallback
+    
+    backfill_cmd = [python_exe, "backfill.py", "--channel", args.channel] + since_arg + to_arg + no_media_flag
     run_cmd(backfill_cmd)
 
     # Convert channel to numeric tg_id if needed for DB lookups
@@ -73,7 +77,7 @@ def main():
         if remaining == 0:
             break
         # run processor
-        proc_cmd = ["python", "processor.py", "--limit", str(args.process_limit)]
+        proc_cmd = [python_exe, "processor.py", "--limit", str(args.process_limit)]
         run_cmd(proc_cmd)
         # small sleep to avoid tight-loop
         time.sleep(1)
@@ -81,7 +85,7 @@ def main():
     # 3) Summarize (generate Markdown)
     os.makedirs(args.out_dir, exist_ok=True)
     md_out = os.path.join(args.out_dir, f"channel_{channel_db_id}_summary.md")
-    sum_cmd = ["python", "summarizer.py", "--channel_id", channel_db_id, "--window-days", str(args.window_days), "--out", md_out]
+    sum_cmd = [python_exe, "summarizer.py", "--channel_id", channel_db_id, "--window-days", str(args.window_days), "--out", md_out]
     run_cmd(sum_cmd)
     print("Summary written to:", md_out)
 
@@ -89,7 +93,7 @@ def main():
     stats_dir = os.path.join(args.out_dir, "stats")
     os.makedirs(stats_dir, exist_ok=True)
     csv_out = os.path.join(stats_dir, f"channel_{channel_db_id}_contributors.csv")
-    stats_cmd = ["python", "compute_stats.py", "--channel", channel_db_id, "--top", "200", "--out", csv_out]
+    stats_cmd = [python_exe, "compute_stats.py", "--channel", channel_db_id, "--top", "200", "--out", csv_out]
     run_cmd(stats_cmd)
     print("Contributor CSV written to:", csv_out)
 

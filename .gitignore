@@ -42,4 +42,4 @@ build/
 Thumbs.db
 
 # Chat sessions (optional - comment out to track in git)
-# .copilot_sessions/
+.copilot_sessions/
