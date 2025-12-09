@@ -1,0 +1,17 @@
+# Discord SignalSifter Cron Configuration
+# Add these entries to your crontab (crontab -e)
+
+# Daily Discord monitoring at 3 AM (low-activity hours)
+0 3 * * * /Users/ll/Sandbox/SignalSifter/discord_monitor.sh --run >> /Users/ll/Sandbox/SignalSifter/logs/discord/cron.log 2>&1
+
+# Weekly catch-up run on Sunday at 4 AM (in case of missed runs)
+0 4 * * 0 /Users/ll/Sandbox/SignalSifter/discord_monitor.sh --catchup >> /Users/ll/Sandbox/SignalSifter/logs/discord/cron.log 2>&1
+
+# Health check every 6 hours
+0 */6 * * * cd /Users/ll/Sandbox/SignalSifter && python3 discord_health_check.py --quick-check >> /Users/ll/Sandbox/SignalSifter/logs/discord/health.log 2>&1
+
+# Weekly full health check on Saturday at 2 AM
+0 2 * * 6 cd /Users/ll/Sandbox/SignalSifter && python3 discord_health_check.py --full-check >> /Users/ll/Sandbox/SignalSifter/logs/discord/health.log 2>&1
+
+# Example configuration with environment setup:
+# 0 3 * * * cd /Users/ll/Sandbox/SignalSifter && source venv/bin/activate && ./discord_monitor.sh --run
