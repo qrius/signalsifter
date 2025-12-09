@@ -340,13 +340,25 @@ class DailyGeminiSync:
 
 def main():
     parser = argparse.ArgumentParser(description="Daily Gemini sync for Telegram channels")
-    parser.add_argument("--channel", required=True, help="Channel username or ID (e.g., @Galactic_Mining_Club)")
+    parser.add_argument("--channel", help="Channel username or ID (e.g., @Galactic_Mining_Club)")
     parser.add_argument("--force-reprocess", action="store_true", 
                        help="Reprocess all messages ignoring last export date")
     parser.add_argument("--stats", action="store_true", 
                        help="Show today's API usage statistics")
+    parser.add_argument("--off-peak-analytics", action="store_true",
+                       help="Run off-peak activity analytics after Gemini sync")
     
     args = parser.parse_args()
+    
+    # Handle off-peak analytics mode
+    if args.off_peak_analytics:
+        return run_off_peak_analytics()
+    
+    # Require channel for normal Gemini sync
+    if not args.channel:
+        print("❌ --channel is required for Gemini sync mode")
+        parser.print_help()
+        return 1
     
     # Get API key
     api_key = os.getenv("GEMINI_API_KEY")
@@ -381,6 +393,38 @@ def main():
     success = sync.sync_channel(args.channel, args.force_reprocess)
     
     return 0 if success else 1
+
+
+def run_off_peak_analytics() -> int:
+    """
+    Run off-peak activity analytics after Gemini sync completion.
+    
+    Returns:
+        Exit code (0 for success, 1 for failure)
+    """
+    print("🌙 Starting off-peak activity analytics...")
+    
+    try:
+        # Import and run dashboard generation
+        sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+        from channel_dashboard import generate_daily_activity_report
+        
+        # Generate activity report
+        report_path = generate_daily_activity_report()
+        
+        print(f"✅ Off-peak analytics completed successfully!")
+        print(f"📁 Activity report: {report_path}")
+        
+        return 0
+        
+    except SystemExit as e:
+        # Handle validation failures from activity_utils
+        print(f"❌ Off-peak analytics failed: Configuration validation error")
+        return e.code if e.code else 1
+        
+    except Exception as e:
+        print(f"❌ Off-peak analytics failed: {e}")
+        return 1
 
 
 if __name__ == "__main__":

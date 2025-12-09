@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS channels (
   username TEXT,
   created_at TEXT,
   last_backfilled_at TEXT,
-  last_gemini_export TEXT
+  last_gemini_export TEXT,
+  last_activity_calculated TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_channel_date ON messages(channel_id, date);
+CREATE INDEX IF NOT EXISTS idx_messages_activity ON messages(channel_id, date, processed, sender_username);
 
 CREATE TABLE IF NOT EXISTS entities (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

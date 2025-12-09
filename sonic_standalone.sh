@@ -52,8 +52,19 @@ run_incremental_sync() {
     
     local exit_code=${PIPESTATUS[0]}
     if [ $exit_code -eq 0 ]; then
-        echo "✅ Incremental sync completed successfully"
-        return 0
+        echo "✅ Gemini sync completed successfully, running off-peak analytics..."
+        
+        # Run off-peak analytics after successful Gemini sync
+        python scripts/daily_gemini_sync.py --off-peak-analytics 2>&1 | tee logs/standalone/activity_$(date +%Y%m%d_%H%M%S).log
+        
+        local analytics_exit=${PIPESTATUS[0]}
+        if [ $analytics_exit -eq 0 ]; then
+            echo "✅ Complete pipeline finished successfully"
+            return 0
+        else
+            echo "⚠️ Gemini sync completed but off-peak analytics failed with exit code: $analytics_exit"
+            return 0  # Don't fail the whole process for analytics issues
+        fi
     else
         echo "❌ Incremental sync failed with exit code: $exit_code"
         return $exit_code
@@ -67,10 +78,27 @@ setup_automation() {
     # Create a standalone cron script
     cat > logs/standalone/sonic_daily_cron.sh << EOF
 #!/bin/bash
-# Daily Sonic English sync - runs independently
+# Daily Sonic English sync - runs independently with off-peak analytics
 cd "$PROJECT_ROOT"
 source .venv/bin/activate
+
+# Run Gemini sync first
+echo "\$(date): Starting Gemini sync..."
 python scripts/daily_gemini_sync.py --channel @Sonic_English >> logs/standalone/daily_cron.log 2>&1
+
+# If Gemini sync successful, run off-peak analytics
+if [ \$? -eq 0 ]; then
+    echo "\$(date): Gemini sync completed, starting off-peak analytics..."
+    python scripts/daily_gemini_sync.py --off-peak-analytics >> logs/standalone/daily_cron.log 2>&1
+    
+    if [ \$? -eq 0 ]; then
+        echo "\$(date): Off-peak analytics completed successfully"
+    else
+        echo "\$(date): Off-peak analytics failed"
+    fi
+else
+    echo "\$(date): Gemini sync failed, skipping off-peak analytics"
+fi
 EOF
     
     chmod +x logs/standalone/sonic_daily_cron.sh
@@ -102,7 +130,14 @@ while true; do
     python scripts/daily_gemini_sync.py --channel @Sonic_English
     
     if [ \$? -eq 0 ]; then
-        echo "\$(date): Sync completed successfully"
+        echo "\$(date): Gemini sync completed, starting off-peak analytics..."
+        python scripts/daily_gemini_sync.py --off-peak-analytics
+        
+        if [ \$? -eq 0 ]; then
+            echo "\$(date): Complete pipeline finished successfully"
+        else
+            echo "\$(date): Off-peak analytics failed"
+        fi
     else
         echo "\$(date): Sync failed, retrying in 1 hour..."
     fi
