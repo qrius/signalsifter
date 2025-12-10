@@ -302,50 +302,124 @@ class DiscordBrowserExtractor:
     async def extract_message_data(self, message_element) -> Optional[Dict[str, Any]]:
         """Extract data from a Discord message element"""
         try:
-            # Get message ID
+            # Get message ID - Updated for current Discord format
             message_id = await message_element.get_attribute('id')
-            if not message_id or not message_id.startswith('chat-messages-'):
-                return None
+            if not message_id:
+                # Try data-list-item-id as fallback
+                message_id = await message_element.get_attribute('data-list-item-id')
             
-            message_id = message_id.replace('chat-messages-', '')
+            if not message_id:
+                self.logger.debug("No message ID found")
+                # Use a fallback ID if none found
+                message_id = f"fallback-{hash(str(await message_element.inner_html()))}"
             
-            # Extract timestamp - use first time element to avoid edited message conflicts
-            timestamp_elem = message_element.locator('time').first
-            timestamp_str = await timestamp_elem.get_attribute('datetime') if await timestamp_elem.count() > 0 else None
+            # Handle different Discord message ID formats
+            if message_id.startswith('chat-messages-'):
+                message_id = message_id.replace('chat-messages-', '')
+            elif message_id.startswith('message-'):
+                message_id = message_id.replace('message-', '')
             
-            if not timestamp_str:
-                return None
+            # Log the message ID for debugging
+            self.logger.debug(f"Processing message with ID: {message_id}")
             
-            timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            # For other formats, use the ID as-is (be more lenient)
+            # No longer require specific format - accept any ID
             
-            # Extract user information with updated 2025 selectors
-            username = "Unknown"
-            username_selectors = [
-                '.username-h_Y3Us',  # Primary Discord 2025 selector
-                '.headerText-2z4IhQ .username-h_Y3Us',
-                'span[class*="username"]', 
-                '.author-1Ml4Lp .username-h_Y3Us',
-                'h3[class*="header"] .username-h_Y3Us',
-                '.messageHeader-1Nh1u7 .username-h_Y3Us',
-                'button[class*="username"]',
-                '.clickable-vvKY2q .username-h_Y3Us',
-                # Fallback selectors
-                '[data-testid="message-username"]',
-                '.username',
-                '[class*="username"]'
+            # Extract timestamp with current Discord selectors
+            timestamp_str = None
+            timestamp_selectors = [
+                'time[id*="message-timestamp-"]',  # Direct timestamp ID from DOM
+                'time[datetime]',  # Time with datetime attribute
+                'span.timestamp_c19a55 time',  # Timestamp class with time
+                '[datetime]',  # Any datetime attribute
+                'time'  # Fallback time element
             ]
             
-            for selector in username_selectors:
+            for selector in timestamp_selectors:
                 try:
-                    username_elem = message_element.locator(selector).first
-                    if await username_elem.count() > 0:
-                        username_text = await username_elem.inner_text()
-                        if username_text and username_text.strip() and username_text != "Unknown":
-                            username = username_text.strip()
-                            self.logger.debug(f"Found username '{username}' using: {selector}")
+                    timestamp_elem = message_element.locator(selector).first
+                    if await timestamp_elem.count() > 0:
+                        # Try datetime attribute first
+                        timestamp_str = await timestamp_elem.get_attribute('datetime')
+                        if not timestamp_str:
+                            # Try data-timestamp attribute
+                            timestamp_str = await timestamp_elem.get_attribute('data-timestamp')
+                        if timestamp_str:
+                            self.logger.debug(f"Found timestamp using: {selector}")
                             break
                 except Exception:
                     continue
+            
+            if not timestamp_str:
+                self.logger.debug("No timestamp found")
+                return None
+            
+            try:
+                timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            except Exception as e:
+                self.logger.debug(f"Failed to parse timestamp '{timestamp_str}': {e}")
+                return None
+            
+            # Extract user information - DEFINITIVE FIX based on console validation
+            username = "Unknown"
+            
+            # First: Try direct attribute extraction (most reliable)
+            try:
+                # Look for any span with data-text attribute in the message
+                data_text_spans = message_element.locator('span[data-text]')
+                count = await data_text_spans.count()
+                
+                for i in range(count):
+                    span = data_text_spans.nth(i)
+                    data_text = await span.get_attribute('data-text')
+                    
+                    # Validate it's a username (not timestamp, etc.)
+                    if (data_text and len(data_text) > 1 and len(data_text) < 50 and
+                        not data_text.startswith('http') and ':' not in data_text and
+                        'AM' not in data_text and 'PM' not in data_text and
+                        data_text not in ['[', ']', '—', 'Today', 'Yesterday']):
+                        
+                        # Double-check this element has username-related classes
+                        class_attr = await span.get_attribute('class') or ""
+                        if 'username' in class_attr:
+                            username = data_text
+                            self.logger.info(f"Found username via data-text: '{username}'")
+                            break
+                            
+            except Exception as e:
+                self.logger.debug(f"Data-text extraction failed: {e}")
+            
+            # Fallback: Try proven selectors with timeout
+            if username == "Unknown":
+                username_selectors = [
+                    'span.username_c19a55[data-text]',  # Console shows this works
+                    'span[class*="username_c19a55"]',   # Console shows this works
+                    '.headerText_c19a55 span.username_c19a55'  # Console shows this works
+                ]
+            
+                for selector in username_selectors:
+                    try:
+                        username_elem = message_element.locator(selector)
+                        elem_count = await username_elem.count()
+                        
+                        if elem_count > 0:
+                            # Get the first match and extract data-text
+                            first_elem = username_elem.first
+                            username_text = await first_elem.get_attribute('data-text')
+                            
+                            if username_text and len(username_text) > 1:
+                                username = username_text.strip()
+                                self.logger.info(f"Found username '{username}' using selector: {selector}")
+                                break
+                                
+                    except Exception as e:
+                        self.logger.debug(f"Selector '{selector}' failed: {e}")
+                        continue
+            
+            # Final fallback: Skip header text method since it extracts '[' 
+            # Console validation shows our selectors work, so if they fail it's a timing issue
+            if username == "Unknown":
+                self.logger.debug("Username extraction failed - selectors should work based on console validation")
             
             # Extract user ID with multiple approaches
             user_id = username  # fallback to username
@@ -384,22 +458,28 @@ class DiscordBrowserExtractor:
                 except Exception:
                     continue
             
-            # Extract message content with updated 2025 selectors
+            # Extract message content with current Discord selectors (Dec 2025)
             content = ""
             content_selectors = [
-                'div[id^="message-content-"]',  # Primary Discord 2025 selector
-                '.messageContent-2t3eCI',
-                '.markup-eYLPri',
-                'div[class*="messageContent"]',
-                'div[class*="markup"]',
-                '.contents-3ca1mk .markup-eYLPri',
-                'span[class*="markup"]',
-                '.content-1Lc7Cv',
-                # Fallback selectors
-                '[data-testid="message-content"]',
-                'div[class*="content"]:not([class*="avatar"])',
-                '.messageContent',
-                '[class*="messageContent"]'
+                # Primary content selectors (EXACT match from DOM)
+                'div[id*="message-content-"]',  # Direct message content ID
+                'div.messageContent_c19a55',  # Exact content class from DOM
+                'div.markup__75297',  # Exact markup class from DOM
+                
+                # Secondary patterns
+                'div[class*="messageContent"]',  # Any message content class
+                'div[class*="markup"]',  # Any markup class  
+                'div[id^="message-content"]',  # ID-based content containers
+                
+                # Fallback patterns
+                'div[class*="content"]:not([class*="avatar"]):not([class*="header"])',
+                'span[data-slate-string="true"]',  # Slate editor strings
+                'div[role="document"]',  # Document role containers
+                '[data-testid="message-content"]',  # Test ID content
+                
+                # Generic fallbacks
+                'p',  # Simple paragraph elements
+                'span:not([class*="timestamp"]):not([class*="username"])'  # Non-metadata spans
             ]
             
             for selector in content_selectors:
@@ -414,21 +494,48 @@ class DiscordBrowserExtractor:
                 except Exception:
                     continue
             
-            # If still no content, try getting all text and filtering
+            # If still no content, try enhanced text extraction methods
             if not content:
                 try:
+                    # Method 1: Get all text and filter intelligently
                     all_text = await message_element.inner_text()
-                    # Remove username and timestamp from content
-                    lines = all_text.split('\n')
-                    filtered_lines = []
-                    for line in lines:
-                        line = line.strip()
-                        if line and line != username and not re.match(r'^(Today|Yesterday|\d+/\d+/\d+)', line):
-                            filtered_lines.append(line)
+                    if all_text:
+                        lines = all_text.split('\n')
+                        filtered_lines = []
+                        
+                        # Skip common metadata patterns
+                        skip_patterns = [
+                            r'^(Today|Yesterday|\d+/\d+/\d+)',  # Date patterns
+                            r'^\d{1,2}:\d{2}\s*(AM|PM)',  # Time patterns
+                            r'^(BOT|APP)$',  # Bot indicators
+                            r'^(pinned|edited)$'  # Action indicators
+                        ]
+                        
+                        for line in lines:
+                            line = line.strip()
+                            if line and line != username:
+                                # Skip if matches any pattern
+                                should_skip = False
+                                for pattern in skip_patterns:
+                                    if re.match(pattern, line, re.IGNORECASE):
+                                        should_skip = True
+                                        break
+                                
+                                if not should_skip and len(line) > 2:  # Minimum content length
+                                    filtered_lines.append(line)
+                        
+                        if filtered_lines:
+                            content = '\n'.join(filtered_lines)
+                            self.logger.debug(f"Extracted content via enhanced filtering: {len(content)} chars")
                     
-                    if filtered_lines:
-                        content = '\n'.join(filtered_lines)
-                        self.logger.debug(f"Extracted content via text filtering: {len(content)} chars")
+                    # Method 2: Try direct text nodes if still no content
+                    if not content:
+                        text_nodes = await message_element.locator('text()').all_inner_texts()
+                        meaningful_text = [t.strip() for t in text_nodes if t.strip() and len(t.strip()) > 2]
+                        if meaningful_text:
+                            content = ' '.join(meaningful_text)
+                            self.logger.debug(f"Extracted content via text nodes: {len(content)} chars")
+                            
                 except:
                     pass
             
@@ -527,13 +634,14 @@ class DiscordBrowserExtractor:
         scroll_attempts = 0
         while scroll_attempts < 50:  # Maximum scroll attempts to prevent infinite loops
             # Get current message count
-            # Try multiple message selectors
+            # Try multiple message selectors (prioritize li elements from DOM)
             message_selectors = [
+                'li[id*="chat-messages-"]',  # EXACT match from DOM
                 '[id^="chat-messages-"]',
-                '[class*="message-"][id]',
+                'li[class*="messageListItem"]',
                 '[data-list-item-id]',
-                'li[id][class*="messageListItem"]',
-                'div[id][class*="message"]'
+                '[class*="message-"][id]',
+                'div[id][class*="message"]'  # Legacy fallback
             ]
             
             current_messages = 0
@@ -657,15 +765,16 @@ class DiscordBrowserExtractor:
             
             # Extract all visible messages
             messages = []
-            # Use the selector that worked during scrolling, or try multiple
+            # Use the selector that worked during scrolling, or try multiple (prioritize li elements)
             message_elements = []
             message_selectors = [
-                getattr(self, 'current_message_selector', '[id^="chat-messages-"]'),
+                'li[id*="chat-messages-"]',  # EXACT match from DOM  
+                getattr(self, 'current_message_selector', 'li[id*="chat-messages-"]'),
                 '[id^="chat-messages-"]',
-                '[class*="message-"][id]', 
+                'li[class*="messageListItem"]',
                 '[data-list-item-id]',
-                'li[id][class*="messageListItem"]',
-                'div[id][class*="message"]'
+                '[class*="message-"][id]', 
+                'div[id][class*="message"]'  # Legacy fallback
             ]
             
             for selector in message_selectors:
