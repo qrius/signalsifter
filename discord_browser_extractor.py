@@ -242,6 +242,66 @@ class DiscordBrowserExtractor:
             self.logger.error(f"Login error: {e}")
             return False
     
+    async def dismiss_popups_and_ads(self):
+        """Dismiss Discord popups, ads, and promotional content"""
+        try:
+            # Common popup/ad selectors to dismiss
+            popup_selectors = [
+                # Discord Nitro/theme ads
+                'button[aria-label*="Close"]',
+                'button[aria-label*="close"]', 
+                'div[aria-label*="Close"] button',
+                '[data-testid="close-button"]',
+                'button:has-text("Not now")',
+                'button:has-text("Maybe later")',
+                'button:has-text("Skip")',
+                'button:has-text("Dismiss")',
+                'button:has-text("Got it")',
+                '.closeButton',
+                '.close-button',
+                # Theme/Nitro promotion modals
+                'div[class*="modal"] button[class*="close"]',
+                'div[class*="Modal"] button[class*="close"]',
+                # Generic close buttons in overlays
+                'div[role="dialog"] button[aria-label*="close"]',
+                'div[class*="overlay"] button',
+                # X buttons
+                'button:has-text("×")',
+                'span:has-text("×") + button',
+            ]
+            
+            dismissed_count = 0
+            for selector in popup_selectors:
+                try:
+                    elements = self.page.locator(selector)
+                    count = await elements.count()
+                    
+                    if count > 0:
+                        self.logger.info(f"Found {count} popup(s) with selector: {selector}")
+                        
+                        for i in range(min(count, 3)):  # Dismiss up to 3 of each type
+                            try:
+                                element = elements.nth(i)
+                                if await element.is_visible():
+                                    await element.click()
+                                    dismissed_count += 1
+                                    await asyncio.sleep(0.5)
+                            except:
+                                pass
+                                
+                except Exception:
+                    continue
+            
+            if dismissed_count > 0:
+                self.logger.info(f"Dismissed {dismissed_count} popups/ads")
+                await asyncio.sleep(2)  # Wait for dismissals to take effect
+            
+            return True
+            
+        except Exception as e:
+            self.logger.debug(f"Error dismissing popups: {e}")
+            return False
+
     async def navigate_to_channel(self, channel_url: str) -> bool:
         """Navigate to a specific Discord channel"""
         try:
@@ -254,8 +314,14 @@ class DiscordBrowserExtractor:
             
             await self.page.goto(channel_url, wait_until="networkidle")
             
+            # Dismiss any popups or ads first
+            await self.dismiss_popups_and_ads()
+            
             # Wait for messages to load
             await self.page.wait_for_selector('[data-list-id="chat-messages"]', timeout=10000)
+            
+            # Dismiss popups again after page load
+            await self.dismiss_popups_and_ads()
             
             # Check if we have access to this channel
             if await self.page.locator('text="You do not have permission"').count() > 0:
@@ -622,7 +688,7 @@ class DiscordBrowserExtractor:
         """Scroll up to load older messages with better persistence"""
         messages_loaded = 0
         consecutive_no_new_messages = 0
-        max_attempts = 20  # Much more persistent - 20 consecutive failures before giving up
+        max_attempts = 30  # Even more persistent - 30 consecutive failures before giving up
         
         # Calculate cutoff date if months_back is specified
         cutoff_date = None
@@ -633,6 +699,9 @@ class DiscordBrowserExtractor:
         
         scroll_attempts = 0
         while scroll_attempts < 50:  # Maximum scroll attempts to prevent infinite loops
+            # Dismiss any popups that might appear during scrolling
+            if scroll_attempts % 5 == 0:  # Every 5 attempts
+                await self.dismiss_popups_and_ads()
             # Get current message count
             # Try multiple message selectors (prioritize li elements from DOM)
             message_selectors = [
@@ -680,15 +749,15 @@ class DiscordBrowserExtractor:
                 # Method 1: Home key (most reliable)
                 await self.page.keyboard.press('Home')
             elif scroll_method == 1:
-                # Method 2: Page Up multiple times
-                for _ in range(3):
+                # Method 2: Page Up multiple times - slower, more human-like
+                for _ in range(2):  # Reduced from 3 to 2
                     await self.page.keyboard.press('PageUp')
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.5)  # Increased from 0.5 to 1.5 seconds
             elif scroll_method == 2:
-                # Method 3: Mouse wheel scrolling
-                for _ in range(5):
-                    await self.page.mouse.wheel(0, -1000)
-                    await asyncio.sleep(0.3)
+                # Method 3: Mouse wheel scrolling - much slower
+                for _ in range(3):  # Reduced from 5 to 3
+                    await self.page.mouse.wheel(0, -800)  # Smaller scroll amount
+                    await asyncio.sleep(1.2)  # Increased from 0.3 to 1.2 seconds
             else:
                 # Method 4: Direct message container scrolling
                 try:
@@ -699,10 +768,15 @@ class DiscordBrowserExtractor:
                     self.logger.debug(f"Container scroll failed: {e}")
                     await self.page.keyboard.press('Home')
             
-            await self.human_delay(1, 2)
+            # Longer human-like delay after scrolling
+            await self.human_delay(2, 4)
             
-            # Wait for messages to load - longer wait on later attempts
-            wait_time = min(3 + (consecutive_no_new_messages * 0.5), 6)
+            # Wait for messages to load - much longer wait for server loading
+            # Increase wait time significantly to allow Discord server to fetch older messages
+            base_wait = 8  # Start with 8 seconds
+            additional_wait = consecutive_no_new_messages * 2  # Add 2s per failed attempt
+            wait_time = min(base_wait + additional_wait, 20)  # Cap at 20 seconds
+            self.logger.debug(f"Waiting {wait_time}s for messages to load from server...")
             await asyncio.sleep(wait_time)
             
             # Use the working selector we identified
