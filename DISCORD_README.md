@@ -18,6 +18,18 @@
    DISCORD_CHANNELS=https://discord.com/channels/1296015181985349715/1296015182417629249
    ```
 
+## ⚠️ Project Status: Experimental
+
+**Note:** This Discord extraction system is currently **experimental**. See [DISCORD_EXTRACTION_SUMMARY.md](DISCORD_EXTRACTION_SUMMARY.md) for detailed analysis of approaches attempted.
+
+**Current Status:**
+- ✅ Browser automation working but unreliable
+- ❌ Commercial tool integration failed
+- 📊 Successfully extracted 3,400+ messages for proof-of-concept
+- 🔄 Requires manual intervention for production use
+
+**For Production Use:** Consider Discord's official API or bot integration instead.
+
 ## Quick Test (Recommended First Step)
 
 ```bash
